@@ -1,3 +1,16 @@
+/**
+ * Implemented by Vitaly "_Vi" Shukela in year 2011
+ * MIT license
+ *
+ * Compresed file format:
+ * 	(Block_length Compressed_block)* Zero_byte
+ *	Block length is either one byte <128 if compressed block length is less than 128
+ *	or big and then little parts of (compressed_block_length|0x8000)
+ *	\x40 - compressed block length is 0x40
+ *	\x81\xFE - compressed block length is 0x01FE
+ */
+
+
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -7,7 +20,7 @@
 #include <snappy.h>        
 #include <snappy-sinksource.h>
 
-#define BUFSIZE 65536
+#define BUFSIZE 0x6D80
 
 class FdSource : public snappy::Source {
  public:
@@ -44,58 +57,96 @@ class FdSource : public snappy::Source {
   }
 };
 
-class FdSink : public snappy::Sink {
- public:
-  FdSink(int fd): fd(fd) { }
-  virtual void Append(const char* data, size_t n) {
-    int ret;
-    while(n) {
-	again:
-	ret = write(fd, data, n);
-	if(ret==-1) {
-	    if (errno == EAGAIN || errno == EINTR) {
-		goto again;
-	    }
-	    perror("write");
-	    exit(3);
-	}
-	n-=ret;
-    }
-  }
-  virtual char* GetAppendBuffer(size_t len, char* scratch) {
-      return scratch;
-  }
-
- private:
-  int fd;
-};
-
 int main(int argc, char* argv[]) {
-    if(argc>3 || (argc==2 && strcmp(argv[1],"-d"))){
-	printf("Only \"snappy\" to encode and \"snappy -d\" to decode.\n");
+    if(argc>2 || (argc==2 && strcmp(argv[1],"-d"))){
+	printf("Only \"snp\" to encode and \"snp -d\" to decode.\n");
 	return 2;
     }
 
-    if(argc==3) {
-	// snappy -d
-	FdSink si(1);
+    char compressed[BUFSIZE*2]; // 32 + source_len + source_len/6
+    if(argc==2) {
+	// "snp -d" - decompressing
 
 	for(;;) {
-	    FdSource so(0);
-	    if(!so.Available()) {
+	    size_t len;
+	    
+	    {
+		unsigned char l1;
+		unsigned char l2;
+		l1 = fgetc(stdin);
+		if(l1<128) {
+		    len = l1;
+		} else {
+		    l2 = fgetc(stdin);
+		    len = l2 + 0x100*(l1&0x7F);
+		}
+	    }
+
+	    if(len==0) {
 		break;
 	    }
-	    snappy::Uncompress(&so, &si);
+
+	    ssize_t ret;
+	    ret = fread(compressed, 1, len, stdin);
+	    if(ret!=len) {
+		fprintf(stderr, "Chopped input data\n");
+		exit(3);
+	    }
+
+	    {
+		char decompressed[BUFSIZE];
+		size_t uc_length;
+		char* decompressed2 = decompressed;
+
+		if (!snappy::GetUncompressedLength(compressed, len, &uc_length)) {
+		    fprintf(stderr, "Invalid input data\n");
+		    exit(3);
+		}
+
+		if (uc_length > BUFSIZE) {
+		    decompressed2 = (char*)malloc(uc_length);
+		}
+		
+		if(!snappy::RawUncompress(compressed, len, decompressed2)) {
+		    fprintf(stderr, "Invalid input date 2\n");
+		    exit(3);
+		}
+
+		fwrite(decompressed2, 1, uc_length, stdout);
+
+		if (uc_length > BUFSIZE) {
+		    free(decompressed2);
+		}
+	    }
+
 	}
     } else {
-	FdSink si(1);
+	// "snp" - compressing
 
 	for(;;) {
 	    FdSource so(0);
 	    if(!so.Available()) {
 		break;
 	    }
-	    snappy::Compress(&so, &si);
+	    snappy::UncheckedByteArraySink si(compressed);
+	    size_t len = snappy::Compress(&so, &si);
+
+	    if(len<128) {
+		unsigned char l=len;
+		fputc(l, stdout);
+	    } else
+	    if(len>=128 || len<0x7FFF) {
+		unsigned char l1=(len/0x100) | 0x80;
+		unsigned char l2=len&0xFF;
+		fputc(l1, stdout);
+		fputc(l2, stdout);
+	    } else {
+		fprintf(stderr, "error: compressed size too big. Miscalculation of input buffer size.\n");
+		exit(3);
+	    }
+
+	    fwrite(compressed, 1, len, stdout);
 	}
+	fputc(0, stdout);
     }
 }
