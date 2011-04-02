@@ -8,6 +8,8 @@
  *	or big and then little parts of (compressed_block_length|0x8000)
  *	\x40 - compressed block length is 0x40
  *	\x81\xFE - compressed block length is 0x01FE
+ *
+ *	Compressed block is compressed using Snappy library
  */
 
 
